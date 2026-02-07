@@ -1,12 +1,16 @@
 const std = @import("std");
 const ztg = @import("ztg");
-const rl = @import("rl");
+const rl = @import("raylib");
 
 pub fn includeWorld(wb: *ztg.WorldBuilder, draw_stage_2d: anytype, draw_stage_3d: anytype) void {
     wb.include(&.{ztg.base});
     wb.addComponents(&.{ DebugRectangle, DebugCube });
-    wb.addSystemsToStage(draw_stage_2d, .{DebugRectangle.draw});
-    wb.addSystemsToStage(draw_stage_3d, .{DebugCube.draw});
+    if (@TypeOf(draw_stage_2d) != @TypeOf(null)) {
+        wb.addSystemsToStage(draw_stage_2d, .{DebugRectangle.draw});
+    }
+    if (@TypeOf(draw_stage_3d) != @TypeOf(null)) {
+        wb.addSystemsToStage(draw_stage_3d, .{DebugCube.draw});
+    }
 }
 
 pub fn drawThroughCams2d(gpa: std.mem.Allocator, world: anytype, stage: anytype) !void {
@@ -41,10 +45,17 @@ pub const DebugRectangle = struct {
 
     pub fn draw(q: ztg.Query(.{ ztg.base.Transform, DebugRectangle })) void {
         for (q.items(ztg.base.Transform), q.items(DebugRectangle)) |tr, dr| {
+            const pos = tr.getPos().flatten().add(dr.offset);
+
             if (dr.filled)
-                rl.DrawRectangleV(tr.getPos().flatten().add(dr.offset).into(rl.Vector2), dr.size.into(rl.Vector2), dr.color)
+                rl.DrawRectangleV(pos.into(rl.Vector2), dr.size.into(rl.Vector2), dr.color)
             else
-                rl.DrawRectangleLinesV(tr.getPos().flatten().add(dr.offset).into(rl.Vector2), dr.size.into(rl.Vector2), dr.color);
+                rl.DrawRectangleLinesEx(.{
+                    .x = pos.x,
+                    .y = pos.y,
+                    .width = dr.size.x,
+                    .height = dr.size.y,
+                }, 1, dr.color);
         }
     }
 };
@@ -66,19 +77,23 @@ pub const DebugCube = struct {
 };
 
 pub const input = struct {
+    pub const InputSource = union(enum) {
+        kb_ms,
+        gamepad: usize,
+    };
+
     pub const ButtonType = union(enum) {
         keyboard: rl.KeyboardKey,
         mouse: rl.MouseButton,
         gamepad: rl.GamepadButton,
 
-        fn fromString(str: []const u8, value0: i32, value1: i32) !ButtonType {
-            _ = value1; // autofix
+        fn fromString(str: []const u8, value0: i32) !ButtonType {
             if (str[0] == 'k') {
                 return .{ .keyboard = @enumFromInt(value0) };
             } else if (str[0] == 'm') {
                 return .{ .mouse = @enumFromInt(value0) };
             } else if (str[0] == 'g') {
-                return .{ .gamepad = value0 };
+                return .{ .gamepad = @enumFromInt(value0) };
             }
             return error.CouldNotConvertFromString;
         }
@@ -103,11 +118,7 @@ pub const input = struct {
         },
         mouse_x,
         mouse_y,
-        gamepad: struct {
-            axis: rl.GamepadAxis,
-            modifier: f32,
-            deadzone: f32,
-        },
+        gamepad: rl.GamepadAxis,
 
         fn fromString(str: []const u8, value0: i32, value1: i32) !AxisType {
             if (str[0] == 'k') {
@@ -116,10 +127,7 @@ pub const input = struct {
                     .negative = @enumFromInt(value1),
                 } };
             } else if (str[0] == 'g') {
-                return .{ .gamepad = .{
-                    .gamepad = value0,
-                    .axis = @enumFromInt(value1),
-                } };
+                return .{ .gamepad = @enumFromInt(value1) };
             } else {
                 if (str[str.len - 1] == 'x') {
                     return .mouse_x;
@@ -130,90 +138,94 @@ pub const input = struct {
             return error.CouldNotConvertFromString;
         }
 
-        pub fn kb(pos: rl.KeyboardKey, neg: rl.KeyboardKey) AxisType {
+        pub fn kb(negative: rl.KeyboardKey, positive: rl.KeyboardKey) AxisType {
             return .{ .keyboard = .{
-                .positive = pos,
-                .negative = neg,
+                .positive = positive,
+                .negative = negative,
             } };
         }
 
-        pub fn gp(axis: rl.GamepadAxis, modifier: f32, deadzone: f32) AxisType {
-            return .{ .gamepad = .{
-                .axis = axis,
-                .modifier = modifier,
-                .deadzone = deadzone,
-            } };
+        pub fn gp(axis: rl.GamepadAxis) AxisType {
+            return .{ .gamepad = axis };
         }
     };
 
-    pub fn isButtonPressed(controller_index: usize, button: ButtonType) bool {
-        return switch (button) {
-            .keyboard => |kb| rl.IsKeyPressed(kb),
-            .mouse => |ms| rl.IsMouseButtonPressed(ms),
-            .gamepad => |gp| rl.IsGamepadButtonPressed(@intCast(controller_index - 1), gp),
-        };
-    }
-
-    pub fn isButtonDown(controller_index: usize, button: ButtonType) bool {
-        return switch (button) {
-            .keyboard => |kb| rl.IsKeyDown(kb),
-            .mouse => |ms| rl.IsMouseButtonDown(ms),
-            .gamepad => |gp| rl.IsGamepadButtonDown(@intCast(controller_index - 1), gp),
-        };
-    }
-
-    pub fn isButtonReleased(controller_index: usize, button: ButtonType) bool {
-        return switch (button) {
-            .keyboard => |kb| rl.IsKeyReleased(kb),
-            .mouse => |ms| rl.IsMouseButtonReleased(ms),
-            .gamepad => |gp| rl.IsGamepadButtonReleased(@intCast(controller_index - 1), gp),
-        };
-    }
-
-    pub fn getAxis(controller_index: usize, axis: AxisType) f32 {
-        return switch (axis) {
-            .keyboard => |kb| blk: {
-                var val: f32 = 0.0;
-                if (rl.IsKeyDown(kb.positive)) val += 1.0;
-                if (rl.IsKeyDown(kb.negative)) val -= 1.0;
-                break :blk val;
+    pub fn isButtonPressed(source: InputSource, button: ButtonType) bool {
+        return switch (source) {
+            .kb_ms => switch (button) {
+                .keyboard => |kb| rl.IsKeyPressed(kb),
+                .mouse => |ms| rl.IsMouseButtonPressed(ms),
+                else => unreachable,
             },
-            .mouse_x => rl.GetMouseDelta().x,
-            .mouse_y => rl.GetMouseDelta().y,
-            .gamepad => |gp| gamepad: {
-                const axis_raw = rl.GetGamepadAxisMovement(@intCast(controller_index), gp.axis);
-                break :gamepad if (@abs(axis_raw) > gp.deadzone) axis_raw * gp.modifier else 0;
+            .gamepad => |num| rl.IsGamepadButtonPressed(@intCast(num), button.gamepad),
+        };
+    }
+
+    pub fn isButtonDown(source: InputSource, button: ButtonType) bool {
+        return switch (source) {
+            .kb_ms => switch (button) {
+                .keyboard => |kb| rl.IsKeyDown(kb),
+                .mouse => |ms| rl.IsMouseButtonDown(ms),
+                else => unreachable,
             },
+            .gamepad => |num| rl.IsGamepadButtonDown(@intCast(num), button.gamepad),
+        };
+    }
+
+    pub fn isButtonReleased(source: InputSource, button: ButtonType) bool {
+        return switch (source) {
+            .kb_ms => switch (button) {
+                .keyboard => |kb| rl.IsKeyReleased(kb),
+                .mouse => |ms| rl.IsMouseButtonReleased(ms),
+                else => unreachable,
+            },
+            .gamepad => |num| rl.IsGamepadButtonReleased(@intCast(num), button.gamepad),
+        };
+    }
+
+    pub fn getAxis(source: InputSource, axis: AxisType) f32 {
+        return switch (source) {
+            .kb_ms => switch (axis) {
+                .keyboard => |kb| blk: {
+                    var val: f32 = 0.0;
+                    if (rl.IsKeyDown(kb.positive)) val += 1.0;
+                    if (rl.IsKeyDown(kb.negative)) val -= 1.0;
+                    break :blk val;
+                },
+                .mouse_x => rl.GetMouseDelta().x,
+                .mouse_y => rl.GetMouseDelta().y,
+                else => unreachable,
+            },
+            .gamepad => |num| rl.GetGamepadAxisMovement(@intCast(num), axis.gamepad),
         };
     }
 
     pub fn exportButtonBinding(writer: anytype, button: ButtonType) !void {
-        const button_fmt: struct { i32, i32 } = switch (button) {
-            .keyboard => |kb| .{ @intFromEnum(kb), 0 },
-            .mouse => |ms| .{ @intFromEnum(ms), 0 },
-            .gamepad => |gp| .{ -1, @intFromEnum(gp) },
+        const button_fmt = switch (button) {
+            .keyboard => |kb| @intFromEnum(kb),
+            .mouse => |ms| @intFromEnum(ms),
+            .gamepad => |gp| @intFromEnum(gp),
         };
-        try writer.print("{s}|{} {}|", .{ @tagName(button), button_fmt[0], button_fmt[1] });
+        try writer.print("{s},{}", .{ @tagName(button), button_fmt });
     }
 
     pub fn exportAxisBinding(writer: anytype, axis: AxisType) !void {
-        const axis_fmt: struct { i32, i32 } = switch (axis) {
-            .keyboard => |kb| .{ @intFromEnum(kb.positive), @intFromEnum(kb.negative) },
-            .mouse_x => .{ 0, 0 },
-            .mouse_y => .{ 0, 0 },
-            .gamepad => |gp| .{ -1, @intFromEnum(gp) },
-        };
-        try writer.print("{s}|{} {}|", .{ @tagName(axis), axis_fmt[0], axis_fmt[1] });
+        try writer.print("{s}", .{@tagName(axis)});
+        switch (axis) {
+            .mouse_x, .mouse_y => {},
+            .keyboard => |kb| try writer.print(",{},{}", .{ @intFromEnum(kb.positive), @intFromEnum(kb.negative) }),
+            .gamepad => |gp| try writer.print(",{}", .{@intFromEnum(gp)}),
+        }
     }
 
     pub fn importButtonBinding(str: []const u8) !ButtonType {
-        const name, const val0, const val1 = try getEnumTagNameAndVals(str);
-        return .fromString(name, val0, val1);
+        const tn_and_vals = try getEnumTagNameAndVals(str);
+        return ButtonType.fromString(tn_and_vals[0], tn_and_vals[1]);
     }
 
     pub fn importAxisBinding(str: []const u8) !AxisType {
-        const name, const val0, const val1 = try getEnumTagNameAndVals(str);
-        return .fromString(name, val0, val1);
+        const tn_and_vals = try getEnumTagNameAndVals(str);
+        return AxisType.fromString(tn_and_vals[0], tn_and_vals[1], tn_and_vals[2]);
     }
 
     fn getEnumTagNameAndVals(str: []const u8) !struct { []const u8, i32, i32 } {
@@ -227,16 +239,16 @@ pub const input = struct {
     }
 
     /// Binds axes and buttons added in `.setupMouse()`
-    pub fn bindMouse(controller: usize, inp: anytype) !void {
-        try inp.addAxisBinding(controller, .mouse_x, .mouse_x);
-        try inp.addAxisBinding(controller, .mouse_y, .mouse_y);
-        try inp.addButtonBinding(controller, .mouse_left, .{ .mouse = rl.MOUSE_BUTTON_LEFT });
-        try inp.addButtonBinding(controller, .mouse_right, .{ .mouse = rl.MOUSE_BUTTON_RIGHT });
-        try inp.addButtonBinding(controller, .mouse_middle, .{ .mouse = rl.MOUSE_BUTTON_MIDDLE });
-        try inp.addButtonBinding(controller, .mouse_side, .{ .mouse = rl.MOUSE_BUTTON_SIDE });
-        try inp.addButtonBinding(controller, .mouse_extra, .{ .mouse = rl.MOUSE_BUTTON_EXTRA });
-        try inp.addButtonBinding(controller, .mouse_forward, .{ .mouse = rl.MOUSE_BUTTON_FORWARD });
-        try inp.addButtonBinding(controller, .mouse_back, .{ .mouse = rl.MOUSE_BUTTON_BACK });
+    pub fn bindMouse(controller: usize, in: anytype) !void {
+        try in.addAxisBinding(controller, .mouse_x, .mouse_x);
+        try in.addAxisBinding(controller, .mouse_y, .mouse_y);
+        try in.addButtonBinding(controller, .mouse_left, .{ .mouse = rl.MOUSE_BUTTON_LEFT });
+        try in.addButtonBinding(controller, .mouse_right, .{ .mouse = rl.MOUSE_BUTTON_RIGHT });
+        try in.addButtonBinding(controller, .mouse_middle, .{ .mouse = rl.MOUSE_BUTTON_MIDDLE });
+        try in.addButtonBinding(controller, .mouse_side, .{ .mouse = rl.MOUSE_BUTTON_SIDE });
+        try in.addButtonBinding(controller, .mouse_extra, .{ .mouse = rl.MOUSE_BUTTON_EXTRA });
+        try in.addButtonBinding(controller, .mouse_forward, .{ .mouse = rl.MOUSE_BUTTON_FORWARD });
+        try in.addButtonBinding(controller, .mouse_back, .{ .mouse = rl.MOUSE_BUTTON_BACK });
     }
 
     pub const MouseButtons = enum {
@@ -253,3 +265,81 @@ pub const input = struct {
         mouse_y,
     };
 };
+
+test {
+    _ = input;
+    _ = DebugCube;
+    _ = DebugRectangle;
+}
+
+test "input" {
+    const Input = ztg.input.Build(input, enum {
+        button_a,
+        button_b,
+    }, enum {
+        axis_a,
+        axis_b,
+    }, .{});
+
+    const World = comptime World: {
+        var wb: ztg.WorldBuilder = .init(&.{Input});
+        wb.addStage(.draw_3d);
+        includeWorld(&wb, .draw, .draw_3d);
+        break :World wb.Build();
+    };
+
+    var world: World = try .init(std.testing.allocator, .{});
+    defer world.deinit();
+
+    const input_ptr = world.getResPtr(Input);
+    try input_ptr.addBindings(.{
+        .buttons = .{
+            .button_a = &.{ .kb(.a), .gp(.right_face_down), .ms(.left) },
+            .button_b = &.{ .kb(.b), .gp(.right_face_right), .ms(.right) },
+        },
+        .axes = .{
+            .axis_a = &.{ .kb(.left, .right), .gp(.left_x), .mouse_x },
+            .axis_b = &.{ .kb(.up, .down), .gp(.left_y), .mouse_y },
+        },
+    });
+
+    try world.runStage(.load);
+    try world.runUpdateStages();
+    try world.runStage(.draw);
+    world.cleanForNextFrame();
+
+    var wa: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer wa.deinit();
+
+    try input_ptr.writeBindings(&wa.writer);
+
+    const bindings_str = try wa.toOwnedSlice();
+    const expected_str =
+        \\buttons:
+        \\button_a=keyboard,65
+        \\button_a=gamepad,7
+        \\button_a=mouse,0
+        \\button_b=keyboard,66
+        \\button_b=gamepad,6
+        \\button_b=mouse,1
+        \\axes:
+        \\axis_a=keyboard,263,262
+        \\axis_a=gamepad,0
+        \\axis_a=mouse_x
+        \\axis_b=keyboard,265,264
+        \\axis_b=gamepad,1
+        \\axis_b=mouse_y
+        \\
+    ;
+    wa.clearRetainingCapacity();
+
+    try std.testing.expectEqualStrings(expected_str, bindings_str);
+
+    input_ptr.clearBindings();
+
+    var expected_reader: std.Io.Reader = .fixed(expected_str);
+    try std.testing.expect(input_ptr.readBindings(&expected_reader));
+    try input_ptr.writeBindings(&wa.writer);
+
+    try std.testing.expectEqualStrings(expected_str, wa.written());
+}

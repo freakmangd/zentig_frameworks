@@ -3,7 +3,11 @@
     .version = "0.0.0",
     .fingerprint = 0x2279d4ce08673209,
     .minimum_zig_version = "0.15.0-dev.27+17b40b1d6",
-    .dependencies = .{},
+    .dependencies = .{
+        .raylib = .{ .path = "../zaylib" },
+        .zentig_ecs = .{ .path = "../zentig_ecs" },
+        .box2d = .{ .path = "../box2d_zig" },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
